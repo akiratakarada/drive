@@ -1,0 +1,706 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Drive Simulator - Phase 2 (Audio & Fixes)</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;user-select:none;-webkit-user-select:none;touch-action:none;}
+body{width:100vw;height:100dvh;overflow:hidden;background:#111;color:#eee;font-family:sans-serif;display:flex;flex-direction:row;}
+.pane-left{flex:1.2;background:#1c1c1c;border-right:2px solid #333;position:relative;padding-left:30px;display:flex;flex-direction:column;align-items:center;justify-content:center;}
+.pane-center{flex:1.5;background:#141414;padding:12px;display:flex;flex-direction:column;justify-content:space-between;}
+.pane-right{flex:1;background:#1c1c1c;border-left:2px solid #333;position:relative;display:flex;flex-direction:column;}
+.sidebrake-btn{position:absolute;top:15px;left:35px;width:75px;height:45px;background:#332;border:2px solid #553;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:bold;z-index:10;}
+.sidebrake-btn.active{background:#822;border-color:#c44;color:#fff;}
+.sound-btn{position:absolute;top:15px;left:120px;width:75px;height:45px;background:#233;border:2px solid #355;border-radius:6px;display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:bold;z-index:10;}
+.sound-btn.active{background:#266;border-color:#488;color:#fff;}
+.shifter-container{width:220px;height:220px;border:2px dashed #444;border-radius:10px;position:relative;background:#111;display:flex;align-items:center;justify-content:center;}
+.gate-label{position:absolute;font-size:12px;color:#666;font-family:monospace;transform:translate(-50%,-50%);}
+.shifter-knob{width:40px;height:40px;background:rgba(85,85,85,0.75);border:2px solid #888;border-radius:50%;position:absolute;transform:translate(-50%,-50%);pointer-events:none;}
+.shifter-knob.active{background:rgba(34,136,170,0.85);border-color:#4cf;}
+.pedal-area{flex:1;position:relative;background:#161616;overflow:hidden;display:flex;flex-direction:column;}
+.pedal-bar-accel{position:absolute;top:50%;left:0;width:100%;height:0%;background:rgba(34,136,34,0.35);pointer-events:none;}
+.pedal-bar-brake{position:absolute;top:42%;left:0;width:100%;height:0%;background:rgba(136,34,34,0.35);pointer-events:none;transform:translateY(-100%);}
+.deadzone-marker{position:absolute;top:42%;left:0;width:100%;height:8%;background:rgba(255,255,255,0.05);border-top:1px dashed #444;border-bottom:1px dashed #444;display:flex;align-items:center;justify-content:center;font-size:9px;color:666;pointer-events:none;}
+.touch-line{position:absolute;left:0;width:100%;height:2px;background:#fff;pointer-events:none;display:none;}
+.debug-box{background:#080808;padding:8px;border-radius:6px;border:1px solid #333;font-family:monospace;font-size:11px;line-height:1.35;}
+.log-box{height:85px;background:#050505;border:1px solid #333;border-radius:4px;padding:6px;font-family:monospace;font-size:10px;overflow:hidden;display:flex;flex-direction:column;justify-content:flex-end;}
+.log-line{color:#aaa;margin-bottom:2px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.log-line:last-child{color:#fff;font-weight:bold;}
+</style>
+</head>
+<body oncontextmenu="return false;">
+<div class="pane-left" id="shifterArea">
+<div class="sidebrake-btn" id="sidebrakeBtn">SIDEBRAKE</div>
+<div class="sound-btn" id="soundBtn">SOUND OFF</div>
+<div class="shifter-container" id="gateBox">
+<div class="gate-label" style="top:calc(50% - 60px);left:calc(50% - 60px);">1</div>
+<div class="gate-label" style="top:calc(50% + 60px);left:calc(50% - 60px);">2</div>
+<div class="gate-label" style="top:calc(50% - 60px);left:50%;">3</div>
+<div class="gate-label" style="top:calc(50% + 60px);left:50%;">4</div>
+<div class="gate-label" style="top:calc(50% - 60px);left:calc(50% + 60px);">5</div>
+<div class="gate-label" style="top:calc(50% + 60px);left:calc(50% + 60px);">6</div>
+<div class="shifter-knob" id="shifterKnob"></div>
+</div>
+</div>
+<div class="pane-center">
+<div style="font-size:13px;font-weight:bold;color:#888;text-align:center;">-- TELEMETRY & DEBUG --</div>
+<div class="debug-box" id="debugBox">GEAR: N | RPM: 900 | SPEED: 0.0 km/h<br>ACCEL: 0.0% | BRAKE: 0.0% | CLUTCH: 0.00<br>WINDOW: CLOSED | SIDEBRAKE: OFF | LIMITER: NO<br>MUTE: YES</div>
+<div class="log-box" id="logBox"></div>
+</div>
+<div class="pane-right">
+<div class="pedal-area" id="pedalArea">
+<div class="pedal-bar-brake" id="brakeBar"></div>
+<div class="deadzone-marker">DEADZONE</div>
+<div class="pedal-bar-accel" id="accelBar"></div>
+<div class="touch-line" id="touchLine"></div>
+</div>
+</div>
+<script>
+/*
+  [確定時の判定順序 (1〜5)]
+  1. 新ギアが N なら判定なし
+  2. 直前が N かつ speed < 1m/s（停車中発進）なら判定なし
+  3. 新ギアが 2速以上かつ rawDriveRPM < 900 なら「LAG (ノッキング)」ログ出力、speed *= 0.97 にして以降の判定(3〜5)は行わない
+  4. ダウンシフト：AUTO BLIP（rpm = clamp(rawDriveRPM, 900, 7500)）。超過時は OVERREV ログ出力、rpm = 7500、speed *= max(0.6, 7500 / rawDriveRPM) ペナルティ
+  5. アップシフト、またはNから走行中投入：現rpmと rawDriveRPM の差で SHOCK小/大/SMOOTH（速度ペナルティ適用）
+*/
+const GATE_SCALE=60,GEAR_RATIOS={'N':0,1:3.5,2:2.1,3:1.4,4:1.0,5:0.8,6:0.65},FINAL_DRIVE=4.1,TIRE_CIRCUMFERENCE=1.85,TIRE_RADIUS=TIRE_CIRCUMFERENCE/(2*Math.PI),SHOCK_DIFF_SMALL=1200,SHOCK_DIFF_LARGE=2500,REDLINE=7500,LIMITER_RESUME=7300;
+const PEDAL_ACCEL_MAX=0.15,PEDAL_ACCEL_ZERO=0.50,PEDAL_BRAKE_ZERO=0.58,PEDAL_BRAKE_MAX=0.90,LAUNCH_RPM_MIN=3000,LAUNCH_SPEED_MAX=3.0,COLUMN_SWITCH_THRESHOLD=0.6;
+let gear='N',accel=0.0,brake=0.0,clutch=0.0,clutchRampTimer=0,rpm=900,displayRPM=900,speed=0.0,sidebrake=false,limiterActive=false,isAccelOn=false;
+let shiftWindowOpen=false,leftPointerId=null,lastTouchClient={x:0,y:0},shifterOrigin={x:0,y:0},shifterCurrentPos={x:0,y:0},currentColumn=0;
+let pedalPointerId=null,sidebrakePointerId=null,cachedGateBoxRect={left:0,top:0,halfW:0,halfH:0},lastKnobPos={x:-999,y:-999};
+let logs=[];
+function addLog(msg){logs.push(msg);if(logs.length>5)logs.shift();}
+const GEAR_POSITIONS={1:{c:-1,r:-1},2:{c:-1,r:1},3:{c:0,r:-1},4:{c:0,r:1},5:{c:1,r:-1},6:{c:1,r:1},'N':{c:0,r:0}};
+function getGearCoords(g){return GEAR_POSITIONS[g]||GEAR_POSITIONS['N'];}
+const sidebrakeBtn=document.getElementById('sidebrakeBtn'),shifterArea=document.getElementById('shifterArea'),gateBox=document.getElementById('gateBox'),shifterKnob=document.getElementById('shifterKnob'),pedalArea=document.getElementById('pedalArea'),brakeBar=document.getElementById('brakeBar'),accelBar=document.getElementById('accelBar'),touchLine=document.getElementById('touchLine');
+function updateCache(){const rect=gateBox.getBoundingClientRect();cachedGateBoxRect.left=rect.left;cachedGateBoxRect.top=rect.top;cachedGateBoxRect.halfW=rect.width/2;cachedGateBoxRect.halfH=rect.height/2;lastKnobPos={x:-999,y:-999};}
+window.addEventListener('resize',updateCache);updateCache();
+document.addEventListener('gesturestart',e=>e.preventDefault());document.addEventListener('gesturechange',e=>e.preventDefault());document.addEventListener('gestureend',e=>e.preventDefault());
+sidebrakeBtn.addEventListener('pointerdown',(e)=>{sidebrakePointerId=e.pointerId;sidebrakeBtn.setPointerCapture(e.pointerId);sidebrake=true;sidebrakeBtn.classList.add('active');if(typeof initAudio==='function')initAudio();e.stopPropagation();});
+function releaseSidebrake(e){if(e.pointerId===sidebrakePointerId){sidebrakePointerId=null;sidebrake=false;sidebrakeBtn.classList.remove('active');}}
+sidebrakeBtn.addEventListener('pointerup',releaseSidebrake);sidebrakeBtn.addEventListener('pointercancel',releaseSidebrake);sidebrakeBtn.addEventListener('lostpointercapture',releaseSidebrake);
+function handlePedalMove(clientY){const rect=pedalArea.getBoundingClientRect();const rawY=Math.max(0,Math.min(rect.height,clientY-rect.top));const norm=1.0-(rawY/rect.height);touchLine.style.display='block';touchLine.style.top=`${rawY}px`;
+if(norm<=PEDAL_ACCEL_ZERO){if(norm<=PEDAL_ACCEL_MAX)accel=1.0;else accel=(PEDAL_ACCEL_ZERO-norm)/(PEDAL_ACCEL_ZERO-PEDAL_ACCEL_MAX);brake=0.0;}else if(norm<PEDAL_BRAKE_ZERO){accel=0.0;brake=0.0;}else{accel=0.0;if(norm>=PEDAL_BRAKE_MAX)brake=1.0;else brake=(norm-PEDAL_BRAKE_ZERO)/(PEDAL_BRAKE_MAX-PEDAL_BRAKE_ZERO);}
+// FIX v5: Pedal bar height from constants
+accelBar.style.height=`${accel*(PEDAL_ACCEL_ZERO-PEDAL_ACCEL_MAX)*100}%`;
+accelBar.style.opacity=`${0.15+accel*0.40}`;
+brakeBar.style.height=`${brake*(PEDAL_BRAKE_MAX-PEDAL_BRAKE_ZERO)*100}%`;
+brakeBar.style.opacity=`${0.15+brake*0.40}`;
+}
+pedalArea.addEventListener('pointerdown',(e)=>{pedalPointerId=e.pointerId;pedalArea.setPointerCapture(e.pointerId);handlePedalMove(e.clientY);if(typeof initAudio==='function')initAudio();});
+pedalArea.addEventListener('pointermove',(e)=>{if(e.pointerId===pedalPointerId)handlePedalMove(e.clientY);});
+function releasePedals(e){if(e.pointerId===pedalPointerId){pedalPointerId=null;accel=0.0;brake=0.0;accelBar.style.height='0%';brakeBar.style.height='0%';touchLine.style.display='none';}}
+pedalArea.addEventListener('pointerup',releasePedals);pedalArea.addEventListener('pointercancel',releasePedals);pedalArea.addEventListener('lostpointercapture',releasePedals);
+shifterArea.addEventListener('pointerdown',(e)=>{if(leftPointerId!==null)return;leftPointerId=e.pointerId;shifterArea.setPointerCapture(e.pointerId);shifterKnob.classList.add('active');lastTouchClient={x:e.clientX,y:e.clientY};if(typeof initAudio==='function')initAudio();e.stopPropagation();});
+shifterArea.addEventListener('pointermove',(e)=>{if(e.pointerId!==leftPointerId)return;lastTouchClient={x:e.clientX,y:e.clientY};if(shiftWindowOpen)processShifterMove(e.clientX,e.clientY);});
+function handleLeftLift(e){if(e.pointerId===leftPointerId){leftPointerId=null;shifterKnob.classList.remove('active');try{shifterArea.releasePointerCapture(e.pointerId);}catch(err){}if(shiftWindowOpen)closeShiftWindow();}}
+shifterArea.addEventListener('pointerup',handleLeftLift);shifterArea.addEventListener('pointercancel',handleLeftLift);shifterArea.addEventListener('lostpointercapture',handleLeftLift);
+function processShifterMove(clientX,clientY){let dx=(clientX-shifterOrigin.x)/GATE_SCALE,dy=(clientY-shifterOrigin.y)/GATE_SCALE;let rawCol=Math.round(dx);rawCol=Math.max(-1,Math.min(1,rawCol));let absDy=Math.abs(dy);let inNeutralLane=currentColumn===rawCol?(absDy<=0.3):(absDy<=0.2);let horizontalExceeded=Math.abs(dx-currentColumn)>COLUMN_SWITCH_THRESHOLD;if(!inNeutralLane&&rawCol!==currentColumn){rawCol=currentColumn;dx=rawCol;}else if(inNeutralLane){if(rawCol!==currentColumn&&!horizontalExceeded)rawCol=currentColumn;currentColumn=rawCol;}if(absDy>0.3){dx=currentColumn;dy=Math.max(-1,Math.min(1,dy));}else{dy=0;dx=currentColumn;}shifterCurrentPos={x:dx,y:dy};}
+function updateKnobVisual(dx,dy){if(dx===lastKnobPos.x&&dy===lastKnobPos.y)return;lastKnobPos.x=dx;lastKnobPos.y=dy;shifterKnob.style.left=`${cachedGateBoxRect.halfW+dx*GATE_SCALE}px`;shifterKnob.style.top=`${cachedGateBoxRect.halfH+dy*GATE_SCALE}px`;}
+function closeShiftWindow(){if(!shiftWindowOpen)return;shiftWindowOpen=false;let bestGear='N',minDist=Infinity;for(let g of [1,2,3,4,5,6,'N']){let target=getGearCoords(g),dist=Math.hypot(shifterCurrentPos.x-target.c,shifterCurrentPos.y-target.r);if(dist<minDist){minDist=dist;bestGear=g;}}if(minDist>0.35)bestGear='N';const oldGear=gear,oldRPM=rpm;gear=bestGear;currentColumn=getGearCoords(gear).c;let wheelRPM=(speed/TIRE_CIRCUMFERENCE)*60,rawDriveRPM=(gear==='N')?900:wheelRPM*GEAR_RATIOS[gear]*FINAL_DRIVE;let isSameGear=(gear===oldGear),isNoMovement=(Math.abs(shifterCurrentPos.x-getGearCoords(oldGear).c)<0.1&&Math.abs(shifterCurrentPos.y-getGearCoords(oldGear).r)<0.1);
+if(!(isSameGear&&isNoMovement)){if(gear!=='N'){const isFromStandstill=(oldGear==='N'&&speed<1.0);if(!isFromStandstill){if(gear>=2&&rawDriveRPM<900){addLog("LAG (ノッキング)");speed*=0.97;if(typeof playSfx==='function')playSfx('LAG');}else{const isDownshift=(typeof oldGear==='number'&&gear<oldGear);if(isDownshift){if(rawDriveRPM>REDLINE){rpm=REDLINE;addLog("OVERREV");speed*=Math.max(0.6,REDLINE/rawDriveRPM);if(typeof playSfx==='function')playSfx('OVERREV');}else{rpm=Math.max(900,rawDriveRPM);addLog("AUTO BLIP");}}else{let diff=Math.abs(oldRPM-rawDriveRPM);if(diff>SHOCK_DIFF_LARGE){addLog(`SHOCK大 (差:${Math.round(diff)})`);speed*=0.85;if(typeof playSfx==='function')playSfx('SHOCK_LARGE');}else if(diff>SHOCK_DIFF_SMALL){addLog(`SHOCK小 (差:${Math.round(diff)})`);speed*=0.95;if(typeof playSfx==='function')playSfx('SHOCK_SMALL');}else{addLog("SMOOTH");if(typeof playSfx==='function')playSfx('SMOOTH');}}}}}}
+if(gear!==oldGear){addLog(`Gear confirmed: ${gear}`);if(typeof playSfx==='function')playSfx('GEAR_CHANGE');}}
+function getTorque(r){if(r<900)return 20;if(r<3000)return 50+(r-900)*0.05;if(r<=5500)return 160;if(r<=7500)return 160-(r-5500)*0.04;return 0;}
+let lastTime=performance.now(),uiTimer=0;
+function loop(timestamp){let dt=(timestamp-lastTime)/1000;lastTime=timestamp;dt=Math.min(dt,0.05);const accelPercent=accel*100;
+if(!isAccelOn&&accelPercent>8.0)isAccelOn=true;else if(isAccelOn&&accelPercent<=5.0)isAccelOn=false;
+const isTouching=(leftPointerId!==null),windowCondition=(!isAccelOn&&isTouching);
+if(windowCondition&&!shiftWindowOpen){shiftWindowOpen=true;const gCoords=getGearCoords(gear);shifterOrigin.x=lastTouchClient.x-(gCoords.c*GATE_SCALE);shifterOrigin.y=lastTouchClient.y-(gCoords.r*GATE_SCALE);processShifterMove(lastTouchClient.x,lastTouchClient.y);addLog("Shift Window: OPEN");}else if(!windowCondition&&shiftWindowOpen)closeShiftWindow();
+if(!isAccelOn){clutch=0.0;clutchRampTimer=0;}else{clutchRampTimer+=dt;clutch=Math.min(1.0,clutchRampTimer/0.2);}
+let wheelRPM=(speed/TIRE_CIRCUMFERENCE)*60,rawDriveRPM=(gear==='N')?900:wheelRPM*GEAR_RATIOS[gear]*FINAL_DRIVE;
+if(gear!=='N'&&clutch>0){if(!limiterActive&&rawDriveRPM>=REDLINE)limiterActive=true;else if(limiterActive&&rawDriveRPM<=LIMITER_RESUME)limiterActive=false;}else limiterActive=false;
+if(gear==='N'||clutch===0.0){if(isAccelOn){let targetRPM=900+accel*(REDLINE-900);rpm+=(targetRPM-rpm)*(1.0-Math.exp(-dt/0.15));rpm=Math.min(REDLINE,rpm);}else rpm+=(900-rpm)*(1.0-Math.exp(-dt/0.4));}else{let targetEngineRPM=isAccelOn?Math.min(REDLINE,rpm+(accel*6000-rpm)*4.0*dt):rawDriveRPM;rpm=targetEngineRPM*(1.0-clutch)+rawDriveRPM*clutch;rpm=Math.max(900,Math.min(REDLINE,rpm));}
+// FIX v5: Continuous displayRPM and launch assist calculation
+let assist=Math.max(0,1.0-speed/LAUNCH_SPEED_MAX);
+let torqueRPM=rpm;
+if(gear===1&&isAccelOn&&clutch>0){torqueRPM=rpm+Math.max(0,LAUNCH_RPM_MIN-rpm)*assist;}
+displayRPM=torqueRPM; // FIX v5
+
+let force=0;if(gear!=='N'&&clutch>0&&isAccelOn&&!limiterActive&&rawDriveRPM<=REDLINE){let torque=getTorque(torqueRPM);force=(torque*GEAR_RATIOS[gear]*FINAL_DRIVE*accel*clutch)/TIRE_RADIUS;}
+let drag=0.3*speed*speed,rollingResistance=50.0,brakeForce=brake*10000.0,sidebrakeForce=sidebrake?6000.0:0.0;
+let netForce=force-drag-rollingResistance-brakeForce-sidebrakeForce,acceleration=netForce/1200.0;
+speed+=acceleration*dt;speed=Math.max(0,speed);
+if(typeof updateAudio==='function')updateAudio(displayRPM,accel,isAccelOn,limiterActive,sidebrake,speed);
+uiTimer+=dt;if(uiTimer>=0.1){uiTimer=0;updateUI();}
+if(shiftWindowOpen&&isTouching)updateKnobVisual(shifterCurrentPos.x,shifterCurrentPos.y);else if(!shiftWindowOpen)updateKnobVisual(getGearCoords(gear).c,getGearCoords(gear).r);
+requestAnimationFrame(loop);}
+function updateUI(){
+document.getElementById('debugBox').innerHTML=`GEAR: <b>${gear}</b> | RPM: ${Math.round(displayRPM)} | SPEED: ${(speed*3.6).toFixed(1)} km/h<br>ACCEL: ${(accel*100).toFixed(1)}% | BRAKE: ${(brake*100).toFixed(1)}% | CLUTCH: ${clutch.toFixed(2)}<br>WINDOW: ${shiftWindowOpen?'OPEN':'CLOSED'} | SIDEBRAKE: ${sidebrake?'ON':'OFF'} | LIMITER: ${limiterActive?'YES':'NO'}<br>MUTE: ${audioCtx&&audioCtx.state==='running'&&masterGain.gain.value>0?'NO':'YES'}`;
+document.getElementById('logBox').innerHTML=logs.map(l=>`<div class="log-line">${l}</div>`).join('');
+}
+requestAnimationFrame(loop);
+</script>
+<script>
+// FIX v5b: Audio module (engine synth, SFX, skid, limiter chop)
+const FUNDAMENTAL_MULT = 1;   // スマホのスピーカーで低音が薄い時は 2 にする（1オクターブ上げる）
+const MASTER_VOLUME = 0.5;
+const SFX_MIN_INTERVAL = 80;  // ms（同じ名前の効果音の連発防止）
+
+var audioCtx = null, masterGain = null; // var: updateUI からの参照でTDZエラーを避ける
+let soundMuted = false;                 // FIX v5b: 起動時はミュートしない（最初に触れば鳴る）
+let osc1, osc2, osc3, filter, engineGain, noiseBuffer, noiseBandpass, noiseGain, skidBandpass, skidGain;
+const lastSfxTimes = {};                // FIX v5b: 効果音の名前ごとに最終時刻を持つ
+let prevIsAccelOn = false, prevRPM = 900;
+
+function initAudio() {
+  if (audioCtx) {
+    if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+    return;
+  }
+  try {
+    const AC = window.AudioContext || window.webkitAudioContext;
+    audioCtx = new AC();
+    masterGain = audioCtx.createGain();
+    masterGain.gain.value = soundMuted ? 0 : MASTER_VOLUME;
+    masterGain.connect(audioCtx.destination);
+
+    // 共有ノイズバッファ（約2秒）。吸気音・スキール・バーストで使い回す
+    const len = Math.floor(audioCtx.sampleRate * 2);
+    noiseBuffer = audioCtx.createBuffer(1, len, audioCtx.sampleRate);
+    const d = noiseBuffer.getChannelData(0);
+    for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+
+    // --- Engine ---
+    engineGain = audioCtx.createGain();
+    engineGain.gain.value = 0.2;
+    filter = audioCtx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 800;
+    filter.Q.value = 1.2;
+    engineGain.connect(filter);
+    filter.connect(masterGain);
+
+    osc1 = audioCtx.createOscillator();
+    osc1.type = 'sawtooth';
+    osc1.frequency.value = 30;
+    osc1.connect(engineGain);
+    osc1.start();
+
+    osc2 = audioCtx.createOscillator();
+    osc2.type = 'sawtooth';
+    osc2.frequency.value = 60;
+    osc2.detune.value = 6;
+    const g2 = audioCtx.createGain();
+    g2.gain.value = 0.5;
+    osc2.connect(g2);
+    g2.connect(engineGain);
+    osc2.start();
+
+    osc3 = audioCtx.createOscillator();
+    osc3.type = 'square';
+    osc3.frequency.value = 15;
+    const g3 = audioCtx.createGain();
+    g3.gain.value = 0.25;
+    osc3.connect(g3);
+    g3.connect(engineGain);
+    osc3.start();
+
+    // --- Intake noise ---
+    const nSrc = audioCtx.createBufferSource();
+    nSrc.buffer = noiseBuffer;
+    nSrc.loop = true;
+    noiseBandpass = audioCtx.createBiquadFilter();
+    noiseBandpass.type = 'bandpass';
+    noiseBandpass.frequency.value = 1200;
+    noiseBandpass.Q.value = 2.0;
+    noiseGain = audioCtx.createGain();
+    noiseGain.gain.value = 0.02;
+    nSrc.connect(noiseBandpass);
+    noiseBandpass.connect(noiseGain);
+    noiseGain.connect(masterGain);
+    nSrc.start();
+
+    // --- Tire skid ---
+    const sSrc = audioCtx.createBufferSource();
+    sSrc.buffer = noiseBuffer;
+    sSrc.loop = true;
+    skidBandpass = audioCtx.createBiquadFilter();
+    skidBandpass.type = 'bandpass';
+    skidBandpass.frequency.value = 1800;
+    skidBandpass.Q.value = 5.0;
+    skidGain = audioCtx.createGain();
+    skidGain.gain.value = 0;
+    sSrc.connect(skidBandpass);
+    skidBandpass.connect(skidGain);
+    skidGain.connect(masterGain);
+    sSrc.start();
+
+    if (audioCtx.state !== 'running') audioCtx.resume().catch(() => {});
+  } catch (e) {
+    console.error('Web Audio init failed', e);
+    audioCtx = null;
+    masterGain = null;
+  }
+}
+
+// FIX v5b: iOS/Androidは指を離した時点で「ユーザー操作」と数えるので、離した時にも初期化・resumeする
+['pointerup', 'touchend', 'click'].forEach(t => document.addEventListener(t, initAudio, { passive: true }));
+
+// SOUND ボタン（シフト領域の中にあるので stopPropagation 必須）
+const soundBtn = document.getElementById('soundBtn');
+function refreshSoundBtn() {
+  soundBtn.textContent = soundMuted ? 'SOUND OFF' : 'SOUND ON';
+  soundBtn.classList.toggle('active', !soundMuted);
+}
+refreshSoundBtn();
+soundBtn.addEventListener('pointerdown', (e) => {
+  initAudio();
+  soundMuted = !soundMuted;
+  if (masterGain && audioCtx) masterGain.gain.setTargetAtTime(soundMuted ? 0 : MASTER_VOLUME, audioCtx.currentTime, 0.02);
+  refreshSoundBtn();
+  e.stopPropagation();
+});
+
+document.addEventListener('visibilitychange', () => {
+  if (!audioCtx) return;
+  if (document.hidden) audioCtx.suspend().catch(() => {});
+  else audioCtx.resume().catch(() => {});
+});
+
+function updateAudio(displayRPM, accel, isAccelOn, limiterActive, sidebrake, speed) {
+  // FIX v5b: 前フレームの値は早期returnの前に更新する（ミュート解除直後の空ブローオフ防止）
+  const wasOn = prevIsAccelOn, wasRPM = prevRPM;
+  prevIsAccelOn = isAccelOn;
+  prevRPM = displayRPM;
+  if (!audioCtx || audioCtx.state !== 'running' || soundMuted) return;
+
+  const now = audioCtx.currentTime;
+  const f = (displayRPM / 30.0) * FUNDAMENTAL_MULT;
+  osc1.frequency.setTargetAtTime(f, now, 0.04);
+  osc2.frequency.setTargetAtTime(f * 2, now, 0.04);
+  osc3.frequency.setTargetAtTime(f * 0.5, now, 0.04);
+
+  filter.frequency.setTargetAtTime(400 + displayRPM * 0.5 + (isAccelOn ? accel * 1500 : 0), now, 0.04);
+  noiseBandpass.frequency.setTargetAtTime(800 + (displayRPM / 7500) * 1700, now, 0.04);
+  noiseGain.gain.setTargetAtTime(isAccelOn ? accel * 0.08 : 0.01, now, 0.04);
+
+  // FIX v5b: リミッター断続は20Hz（周期50ms）、時定数も短くして聞こえるようにする
+  let limiterMult = 1.0, engineTC = 0.03;
+  if (limiterActive) {
+    limiterMult = (Math.floor(now * 40) % 2 === 0) ? 0.3 : 1.0;
+    engineTC = 0.005;
+  }
+  engineGain.gain.setTargetAtTime((isAccelOn ? (0.25 + accel * 0.35) : 0.18) * limiterMult, now, engineTC);
+
+  // アクセルを離した瞬間：ブローオフ / バックファイア
+  if (wasOn && !isAccelOn) {
+    if (wasRPM > 4500) triggerNoiseBurst(2500, 0.15, 0.25);
+    if (wasRPM > 6000) {
+      const pops = Math.floor(Math.random() * 3); // 0〜2回
+      let delay = 0;
+      for (let i = 0; i < pops; i++) {
+        delay += 50 + Math.random() * 150;
+        const dur = 0.04 + Math.random() * 0.04;
+        setTimeout(() => triggerNoiseBurst(1000 + Math.random() * 400, dur, 0.3), delay);
+      }
+    }
+  }
+
+  // サイドブレーキのスキール音
+  if (sidebrake && speed > 4.0) skidGain.gain.setTargetAtTime(Math.min(0.3, speed * 0.012), now, 0.05);
+  else skidGain.gain.setTargetAtTime(0, now, 0.05);
+}
+
+function triggerNoiseBurst(centerFreq, duration, volume) {
+  if (!audioCtx || audioCtx.state !== 'running' || soundMuted || !noiseBuffer) return;
+  try {
+    const now = audioCtx.currentTime;
+    const src = audioCtx.createBufferSource();
+    src.buffer = noiseBuffer;
+    const bp = audioCtx.createBiquadFilter();
+    bp.type = 'bandpass';
+    bp.frequency.value = centerFreq;
+    bp.Q.value = 3.0;
+    const g = audioCtx.createGain();
+    g.gain.setValueAtTime(volume, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + duration);
+    src.connect(bp);
+    bp.connect(g);
+    g.connect(masterGain);
+    src.start(now, Math.random() * 1.5, duration);
+  } catch (e) {}
+}
+
+function playClick() {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = 'square';
+  o.frequency.setValueAtTime(180, t);
+  o.frequency.exponentialRampToValueAtTime(90, t + 0.04);
+  g.gain.setValueAtTime(0.3, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.04);
+  o.connect(g); g.connect(masterGain);
+  o.start(t); o.stop(t + 0.04);
+}
+
+function playBlip() {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = 'sine';
+  o.frequency.setValueAtTime(1200, t);
+  g.gain.setValueAtTime(0.1, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + 0.03);
+  o.connect(g); g.connect(masterGain);
+  o.start(t); o.stop(t + 0.03);
+}
+
+function triggerGrindSFX(freq, duration, volume) {
+  const t = audioCtx.currentTime;
+  const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+  o.type = 'sawtooth';
+  o.frequency.setValueAtTime(freq, t);
+  g.gain.setValueAtTime(volume, t);
+  g.gain.exponentialRampToValueAtTime(0.001, t + duration);
+  o.connect(g); g.connect(masterGain);
+  o.start(t); o.stop(t + duration);
+  triggerNoiseBurst(600, duration, volume * 0.8);
+}
+
+// SMOOTH は高いブリップだけ（クリックは GEAR_CHANGE 側が鳴らすので二重にしない）
+function playSfx(name) {
+  if (!audioCtx || audioCtx.state !== 'running' || soundMuted) return;
+  const t = performance.now();
+  if (lastSfxTimes[name] !== undefined && t - lastSfxTimes[name] < SFX_MIN_INTERVAL) return;
+  lastSfxTimes[name] = t;
+  try {
+    if (name === 'GEAR_CHANGE') playClick();
+    else if (name === 'SMOOTH') playBlip();
+    else if (name === 'SHOCK_SMALL') triggerGrindSFX(80, 0.1, 0.35);
+    else if (name === 'SHOCK_LARGE' || name === 'LAG' || name === 'OVERREV') triggerGrindSFX(60, 0.22, 0.5);
+  } catch (e) {}
+}
+</script>
+<script>
+// FIX v5c: Phase 3 rewritten — gyro steering + pseudo-3D loop road (Canvas 2D, no libraries)
+(function () {
+'use strict';
+
+// ===== TUNING（ここをいじれば挙動が変わる） =====
+const STEER_MAX_DEG = 35;      // この角度でフルロック
+const STEER_DEADZONE_DEG = 2;  // 遊び
+const STEER_SMOOTH = 0.25;     // 大きいほど素早く追従
+const STEER_CURVE = 1.3;       // 1より大きいと、中央付近が鈍く端で効く
+const STEER_GAIN = 2.2;        // 曲がりやすさ（speedPercent=1・フルロックで毎秒これだけ横移動）
+const CENTRIFUGAL = 0.6;       // カーブで外へ膨らむ強さ
+const SPEED_REF = 60;          // m/s。横移動のスケール基準
+const SEG_LEN = 6;             // セグメント長(m)
+const DRAW_DISTANCE = 150;     // 描画するセグメント数（重い端末は100）
+const ROAD_HALF = 3.5;         // 道路の半幅(m)。playerX=±1が道路の左右端
+const CAMERA_HEIGHT = 1.2;     // 目線の高さ(m)
+const FOV_DEG = 75;            // 視野角（小さいほどズーム）
+const HORIZON = 0.42;          // 地平線の位置（画面高さの割合）
+const NEAR = 1.0;              // 手前のクリップ距離(m)
+const KAPPA = 1 / 500;         // curve値1あたりの曲率(1/m)。curve=6で半径約83m
+const MAX_ROLL = 0.06;         // 画面ロールの最大(rad)
+const DRIFT_STEER_MULT = 1.6;  // サイドブレーキ中の旋回倍率
+const DRIFT_CENTRI_MULT = 1.3; // サイドブレーキ中の遠心力倍率
+const WALL_X = 2.2;            // これを超えたら壁
+
+// ===== STATE =====
+let steerRaw = 0, steerFiltered = 0, steerInverted = false;
+let playerX = 0, trackZ = 0, roll = 0, flash = 0, wallCooldown = 0, bgX = 0;
+let gyroActive = false, gyroLastTime = performance.now();
+let zeroTheta = 0, currentRawTheta = 0, started = false, uiTimer = 0;
+
+// ===== DOM =====
+const paneCenter = document.querySelector('.pane-center');
+paneCenter.style.padding = '0';
+paneCenter.style.position = 'relative';
+
+const canvas = document.createElement('canvas');
+canvas.style.cssText = 'position:absolute;inset:0;width:100%;height:100%;z-index:1;display:block;';
+paneCenter.insertBefore(canvas, paneCenter.firstChild);
+const ctx = canvas.getContext('2d');
+
+const titleDiv = paneCenter.querySelector('div:not(#debugBox):not(#logBox)');
+if (titleDiv) titleDiv.style.display = 'none';
+
+const debugBox = document.getElementById('debugBox');
+const logBox = document.getElementById('logBox');
+debugBox.style.cssText = 'position:absolute;top:5px;left:5px;z-index:5;background:rgba(0,0,0,0.65);padding:4px 8px;border-radius:4px;font-size:9px;pointer-events:none;';
+logBox.style.cssText = 'position:absolute;bottom:5px;left:5px;right:5px;height:50px;z-index:5;background:rgba(0,0,0,0.65);border:1px solid #333;font-size:8px;pointer-events:none;display:flex;flex-direction:column;justify-content:flex-end;padding:4px;overflow:hidden;';
+
+// FIX v5c: debugBox は updateUI が中身を作り直すので、追加の1行は外に置く
+const extraDebug = document.createElement('div');
+extraDebug.style.cssText = 'position:absolute;bottom:62px;left:5px;z-index:5;background:rgba(0,0,0,0.65);color:#8ff;font:8px monospace;padding:2px 6px;border-radius:3px;pointer-events:none;';
+paneCenter.appendChild(extraDebug);
+
+function makeBtn(label, right) {
+  const b = document.createElement('div');
+  b.textContent = label;
+  b.style.cssText = 'position:absolute;top:5px;right:' + right + 'px;width:35px;height:25px;background:#333;border:1px solid #555;color:#fff;font:bold 9px sans-serif;display:flex;align-items:center;justify-content:center;border-radius:3px;z-index:10;';
+  paneCenter.appendChild(b);
+  return b;
+}
+const calBtn = makeBtn('CAL', 45);
+calBtn.addEventListener('pointerdown', (e) => { zeroTheta = currentRawTheta; e.stopPropagation(); });
+const invBtn = makeBtn('INV', 5);
+invBtn.addEventListener('pointerdown', (e) => {
+  steerInverted = !steerInverted;
+  invBtn.style.background = steerInverted ? '#633' : '#333';
+  e.stopPropagation();
+});
+
+// ===== 縦持ち警告 =====
+const portrait = document.createElement('div');
+portrait.style.cssText = 'position:fixed;inset:0;z-index:2000;background:#000;color:#fa4;display:none;align-items:center;justify-content:center;font:16px sans-serif;text-align:center;padding:20px;';
+portrait.textContent = '📱 横向きにしてください';
+document.body.appendChild(portrait);
+function checkOrientation() { portrait.style.display = (window.innerHeight > window.innerWidth) ? 'flex' : 'none'; }
+window.addEventListener('resize', checkOrientation);
+checkOrientation();
+
+// ===== スタート画面（全画面） =====
+const overlay = document.createElement('div');
+overlay.style.cssText = 'position:fixed;inset:0;background:rgba(0,0,0,0.92);z-index:1000;display:flex;flex-direction:column;align-items:center;justify-content:center;color:#fff;font-family:sans-serif;text-align:center;padding:20px;';
+const msg = document.createElement('div');
+msg.style.cssText = 'font-size:14px;color:#aaa;margin-top:14px;';
+msg.textContent = '画面をタップでスタート（ハンドルを握る持ち方で）';
+overlay.innerHTML = '<div style="font-size:22px;font-weight:bold;color:#4cf;">DRIVE SIM</div>';
+overlay.appendChild(msg);
+document.body.appendChild(overlay);
+
+overlay.addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (started) return;
+  started = true;
+  // ユーザー操作の中で同期的に呼ぶ（iOSの許可・全画面・音の初期化）
+  let perm = Promise.resolve();
+  try {
+    if (typeof DeviceMotionEvent !== 'undefined' && typeof DeviceMotionEvent.requestPermission === 'function') {
+      perm = DeviceMotionEvent.requestPermission().catch(() => {});
+    }
+  } catch (err) {}
+  try { if (typeof initAudio === 'function') initAudio(); } catch (err) {}
+  try {
+    const el = document.documentElement;
+    const rf = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (rf) {
+      const p = rf.call(el);
+      if (p && p.then) p.then(() => { try { screen.orientation.lock('landscape').catch(() => {}); } catch (err) {} }).catch(() => {});
+    }
+  } catch (err) {}
+  try { if (navigator.wakeLock) navigator.wakeLock.request('screen').catch(() => {}); } catch (err) {}
+  msg.textContent = 'キャリブレーション中…そのまま構えてね';
+  perm.then(() => setTimeout(() => { zeroTheta = currentRawTheta; overlay.remove(); }, 1000));
+});
+
+// ===== ジャイロ操舵 =====
+// 画面面内の重力ベクトルの角度で、ハンドルを回す動きを取る。ゼロ点との差なので、iOS/Androidの符号反転は影響しない
+window.addEventListener('devicemotion', (e) => {
+  gyroLastTime = performance.now();
+  gyroActive = true;
+  const a = e.accelerationIncludingGravity;
+  if (!a || a.x == null || a.y == null) return;
+  if (Math.hypot(a.x, a.y) < 3) return; // スマホが寝ている時は前回値を保持
+  currentRawTheta = Math.atan2(a.y, a.x);
+  let d = currentRawTheta - zeroTheta;
+  while (d > Math.PI) d -= 2 * Math.PI;
+  while (d < -Math.PI) d += 2 * Math.PI;
+  let deg = d * 180 / Math.PI;
+  if (steerInverted) deg = -deg;
+  const ad = Math.abs(deg);
+  if (ad < STEER_DEADZONE_DEG) { steerRaw = 0; return; }
+  const n = Math.min(1, (ad - STEER_DEADZONE_DEG) / (STEER_MAX_DEG - STEER_DEADZONE_DEG));
+  steerRaw = Math.sign(deg) * Math.pow(n, STEER_CURVE);
+});
+
+const keys = {};
+window.addEventListener('keydown', (e) => { keys[e.key.toLowerCase()] = true; });
+window.addEventListener('keyup', (e) => { keys[e.key.toLowerCase()] = false; });
+
+// ===== コース =====
+const segs = []; // 各セグメントの curve 値（右＋、左−）
+function ease(a, b, t) { const s = t * t * (3 - 2 * t); return a + (b - a) * s; }
+function addRoad(enter, hold, leave, curve) {
+  for (let i = 0; i < enter; i++) segs.push(ease(0, curve, i / enter));
+  for (let i = 0; i < hold; i++) segs.push(curve);
+  for (let i = 0; i < leave; i++) segs.push(ease(curve, 0, i / leave));
+}
+function straight(n) { addRoad(0, n, 0, 0); }
+// コース定義（addRoad(入り, 維持, 抜け, curve)）。ここを編集すればコースが変わる
+straight(60);
+addRoad(20, 40, 20, 3);    // 右（中）
+straight(30);
+addRoad(25, 35, 25, -4);   // 左
+straight(20);
+addRoad(15, 25, 15, 3);    // S字（右→左）
+addRoad(15, 25, 15, -3);
+straight(40);
+addRoad(20, 30, 20, 6);    // ヘアピン（右）
+straight(40);
+addRoad(20, 30, 20, -5);   // 左（きつめ）
+straight(120);
+addRoad(30, 40, 30, -2);   // 緩い左
+while (segs.length % 6) segs.push(0); // 縞模様がループでつながるよう6の倍数にそろえる
+const N = segs.length;
+const trackLen = N * SEG_LEN;
+
+// ===== キャンバスの大きさ =====
+function resizeCanvas() {
+  const cw = paneCenter.clientWidth || 300, ch = paneCenter.clientHeight || 300;
+  const s = Math.min(window.devicePixelRatio || 1, 1);
+  const w = Math.round(Math.min(cw, 640) * s);
+  canvas.width = w;
+  canvas.height = Math.round(ch * w / cw);
+}
+window.addEventListener('resize', resizeCanvas);
+resizeCanvas();
+
+// ===== 描画 =====
+const PX = new Float32Array(DRAW_DISTANCE + 1), PY = new Float32Array(DRAW_DISTANCE + 1);
+const PW = new Float32Array(DRAW_DISTANCE + 1), PS = new Float32Array(DRAW_DISTANCE + 1);
+
+function quad(a, b, c, d, e, f, g, h) {
+  ctx.beginPath(); ctx.moveTo(a, b); ctx.lineTo(c, d); ctx.lineTo(e, f); ctx.lineTo(g, h); ctx.closePath(); ctx.fill();
+}
+
+function render(curCurve) {
+  const W = canvas.width, H = canvas.height, half = W / 2, horizon = H * HORIZON;
+  const cd = 1 / Math.tan(FOV_DEG * Math.PI / 360);
+
+  ctx.save();
+  ctx.translate(W / 2, H * 0.75); ctx.rotate(roll); ctx.translate(-W / 2, -H * 0.75);
+
+  // 空
+  const sky = ctx.createLinearGradient(0, 0, 0, horizon);
+  sky.addColorStop(0, '#0b1a3a'); sky.addColorStop(1, '#5a7fb0');
+  ctx.fillStyle = sky; ctx.fillRect(-W, -H, 3 * W, horizon + H);
+
+  // 山（カーブとステアで横に流れる。距離では流れない）
+  ctx.fillStyle = '#2a3552';
+  ctx.beginPath(); ctx.moveTo(-W, horizon);
+  const off = ((bgX % 150) + 150) % 150, shift = Math.floor(bgX / 150);
+  for (let i = -3; i < Math.ceil(W / 150) + 3; i++) {
+    const k = i - shift, hgt = 22 + (((k * 37) % 5 + 5) % 5) * 9;
+    const x0 = i * 150 + off;
+    ctx.lineTo(x0 + 75, horizon - hgt); ctx.lineTo(x0 + 150, horizon);
+  }
+  ctx.lineTo(2 * W, horizon); ctx.closePath(); ctx.fill();
+
+  // 地面のベース
+  ctx.fillStyle = '#142b14'; ctx.fillRect(-W, horizon, 3 * W, H * 2);
+
+  // 投影（FIX v5c: 道路は地平線の下。x は曲率から累積）
+  const baseSeg = Math.floor(trackZ / SEG_LEN), bp = trackZ / SEG_LEN - baseSeg;
+  const K = KAPPA * SEG_LEN * SEG_LEN;
+  let x = 0, dx = -segs[baseSeg % N] * bp * K;
+  for (let k = 0; k <= DRAW_DISTANCE; k++) {
+    const z = Math.max(NEAR + k * 0.01, (k - bp) * SEG_LEN);
+    const sc = cd / z;
+    PS[k] = sc;
+    PX[k] = half + sc * (x - playerX * ROAD_HALF) * half;
+    PY[k] = horizon + sc * CAMERA_HEIGHT * half;
+    PW[k] = sc * ROAD_HALF * half;
+    x += dx; dx += segs[(baseSeg + k) % N] * K;
+  }
+
+  // 奥から手前へ描く
+  for (let n = DRAW_DISTANCE - 1; n >= 0; n--) {
+    const y1 = PY[n], y2 = PY[n + 1];
+    if (y2 >= y1) continue;
+    const idx = (baseSeg + n) % N, alt = (Math.floor(idx / 3) % 2) === 0;
+    const x1 = PX[n], x2 = PX[n + 1], w1 = PW[n], w2 = PW[n + 1];
+
+    ctx.fillStyle = alt ? '#1b3b1b' : '#142b14';
+    ctx.fillRect(-W, y2, 3 * W, y1 - y2 + 1);
+
+    ctx.fillStyle = alt ? '#b22' : '#eee'; // 縁石
+    quad(x1 - w1 * 1.12, y1, x1 - w1, y1, x2 - w2, y2, x2 - w2 * 1.12, y2);
+    quad(x1 + w1, y1, x1 + w1 * 1.12, y1, x2 + w2 * 1.12, y2, x2 + w2, y2);
+
+    ctx.fillStyle = alt ? '#3a3a3a' : '#333'; // 路面
+    quad(x1 - w1, y1, x1 + w1, y1, x2 + w2, y2, x2 - w2, y2);
+
+    if (idx % 6 < 3) { // センターライン（破線）
+      const l1 = w1 * 0.03, l2 = w2 * 0.03;
+      ctx.fillStyle = '#ee0';
+      quad(x1 - l1, y1, x1 + l1, y1, x2 + l2, y2, x2 - l2, y2);
+    }
+
+    if (idx % 6 === 0 && n > 1) { // 道路脇のポール
+      const ph = PS[n] * 2.2 * half, pw = Math.max(1, PS[n] * 0.2 * half);
+      ctx.fillStyle = '#ccc';
+      ctx.fillRect(x1 - w1 * 1.6 - pw / 2, y1 - ph, pw, ph);
+      ctx.fillRect(x1 + w1 * 1.6 - pw / 2, y1 - ph, pw, ph);
+    }
+  }
+
+  // 遠方のフォグ（ポップインを隠す）
+  const fh = H * 0.12;
+  const fog = ctx.createLinearGradient(0, horizon - 2, 0, horizon + fh);
+  fog.addColorStop(0, 'rgba(90,127,176,1)'); fog.addColorStop(1, 'rgba(90,127,176,0)');
+  ctx.fillStyle = fog; ctx.fillRect(-W, horizon - 2, 3 * W, fh + 2);
+
+  ctx.restore();
+
+  // HUD
+  ctx.strokeStyle = '#fff'; ctx.lineWidth = 1.5;
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - 8, H - 28); ctx.lineTo(W / 2 + 8, H - 28);
+  ctx.moveTo(W / 2, H - 36); ctx.lineTo(W / 2, H - 20);
+  ctx.stroke();
+
+  if (flash > 0.01) { ctx.fillStyle = 'rgba(255,0,0,' + (flash * 0.4).toFixed(2) + ')'; ctx.fillRect(0, 0, W, H); }
+  if (!gyroActive) {
+    ctx.fillStyle = 'rgba(255,100,100,0.9)'; ctx.font = Math.max(9, W / 40) + 'px monospace';
+    ctx.fillText('NO GYRO (A/D or arrows)', 8, H - 8);
+  }
+}
+
+// ===== メインループ =====
+let last = performance.now();
+function loop(ts) {
+  let dt = (ts - last) / 1000; last = ts; dt = Math.min(dt, 0.05);
+
+  // ジャイロが来ていなければキーボード
+  if (performance.now() - gyroLastTime > 1500) {
+    gyroActive = false;
+    steerRaw = ((keys['arrowright'] || keys['d']) ? 1 : 0) - ((keys['arrowleft'] || keys['a']) ? 1 : 0);
+  }
+  steerFiltered += (steerRaw - steerFiltered) * STEER_SMOOTH;
+
+  // 横方向の車両ダイナミクス（speed, sidebrake は既存コードのグローバル）
+  const sp = speed / SPEED_REF, drift = sidebrake;
+  playerX += steerFiltered * sp * dt * STEER_GAIN * (drift ? DRIFT_STEER_MULT : 1);
+  const curCurve = segs[Math.floor(trackZ / SEG_LEN) % N];
+  playerX -= sp * sp * curCurve * dt * CENTRIFUGAL * (drift ? DRIFT_CENTRI_MULT : 1);
+
+  trackZ += speed * dt;
+  if (trackZ >= trackLen) trackZ -= trackLen;
+  if (trackZ < 0) trackZ += trackLen;
+
+  // オフロードと壁
+  if (Math.abs(playerX) > 1.0) speed *= (1 - 0.9 * dt);
+  wallCooldown = Math.max(0, wallCooldown - dt);
+  if (Math.abs(playerX) > WALL_X) {
+    playerX = playerX > 0 ? 2.0 : -2.0;
+    if (wallCooldown === 0) {
+      speed *= 0.5; wallCooldown = 0.5; flash = 1;
+      if (typeof playSfx === 'function') playSfx('SHOCK_LARGE');
+    }
+  }
+  flash = Math.max(0, flash - dt * 2.5);
+
+  // 画面ロールと山のスクロール
+  const rollTarget = Math.max(-MAX_ROLL, Math.min(MAX_ROLL,
+    (steerFiltered * 0.6 + curCurve * 0.12) * Math.min(sp, 1) * (drift ? 1.5 : 1) * MAX_ROLL));
+  roll += (rollTarget - roll) * Math.min(1, dt * 6);
+  bgX -= (curCurve * sp * 40 + steerFiltered * sp * 10) * dt;
+
+  render(curCurve);
+
+  uiTimer += dt;
+  if (uiTimer >= 0.1) {
+    uiTimer = 0;
+    extraDebug.textContent = 'STEER ' + (steerFiltered * STEER_MAX_DEG).toFixed(1) + '° (' + steerFiltered.toFixed(2) + ') | X ' + playerX.toFixed(2) + ' | LAP ' + (trackZ / trackLen * 100).toFixed(1) + '%';
+  }
+  requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+})();
+</script>
+</body>
+</html>
